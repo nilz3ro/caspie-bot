@@ -3,7 +3,7 @@ use reqwest;
 use serde::{Deserialize, Serialize};
 use status::BasicNodeStatus;
 use std::{collections::HashMap, time::Duration};
-use teloxide::prelude::*;
+use teloxide::{prelude::*, utils::command::BotCommand};
 use tokio::sync::{mpsc, oneshot};
 
 #[tokio::main]
@@ -39,15 +39,39 @@ pub enum Message {
 mod bot {
     use super::*;
 
+    #[derive(BotCommand)]
+    #[command(rename = "lowercase", description = "These commands are supported:")]
+    pub enum Command {
+        #[command(description = "display this text.")]
+        Help,
+        #[command(description = "handle a username.")]
+        Subscribe(String),
+        #[command(description = "Unsubscribe.")]
+        Unsubscribe(String),
+    }
+
     pub async fn start_repl(bot: AutoSend<Bot>, bktx: mpsc::Sender<Message>) {
         info!("starting repl...");
         teloxide::repl(bot, |message| async move {
-            let id = message.chat_id();
-            info!("got message from chatter: {}", id);
-
-            message.answer_dice().await?;
-            info!("answered with a dice roll.");
-
+            let t = message.update.text().unwrap();
+            match BotCommand::parse(t, String::from("caspiebot")) {
+                Ok(Command::Help) => {
+                    info!("help called");
+                }
+                Ok(Command::Subscribe(s)) => {
+                    info!("sub called");
+                    let (tx, rx) = oneshot::channel();
+                    bktx.send(Message::Subscribe {
+                        chat_id: message.chat_id(),
+                        status_url: s,
+                        response_tx: tx,
+                    });
+                }
+                Ok(Command::Unsubscribe(s)) => {
+                    info!("unsub called");
+                }
+                Err(_) => todo!(),
+            }
             respond(())
         })
         .await
