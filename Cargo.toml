@@ -7,6 +7,7 @@ edition = "2018"
 
 [dependencies]
 anyhow = "*"
+lazy_static = "*"
 log = "0.4.14"
 pretty_env_logger = "0.4.0"
 reqwest = { version = "0.11.4", features = ["json"] }

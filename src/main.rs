@@ -1,10 +1,19 @@
+use lazy_static::*;
 use log::info;
 use reqwest;
 use serde::{Deserialize, Serialize};
 use status::BasicNodeStatus;
+use std::sync::Mutex;
 use std::{collections::HashMap, time::Duration};
 use teloxide::{prelude::*, utils::command::BotCommand};
 use tokio::sync::{mpsc, oneshot};
+
+lazy_static! {
+    static ref BKCHAN: (mpsc::Sender<Message>, Mutex<mpsc::Receiver<Message>>) = {
+        let (tx, mut rx) = mpsc::channel(64);
+        (tx, Mutex::new(rx))
+    };
+}
 
 #[tokio::main]
 async fn main() {
@@ -12,11 +21,10 @@ async fn main() {
     info!("starting...");
 
     let bot = Bot::from_env().auto_send();
-    let (tx, mut rx) = mpsc::channel(64);
 
     tokio::join!(
-        book_keeping::run_book_keeping(bot.clone(), &mut rx),
-        bot::start_repl(bot.clone(), tx)
+        book_keeping::run_book_keeping(bot.clone()),
+        bot::start_repl(bot.clone())
     );
 }
 
@@ -50,7 +58,7 @@ mod bot {
         Unsubscribe(String),
     }
 
-    pub async fn start_repl(bot: AutoSend<Bot>, bktx: mpsc::Sender<Message>) {
+    pub async fn start_repl(bot: AutoSend<Bot>) {
         info!("starting repl...");
         teloxide::repl(bot, |message| async move {
             let t = message.update.text().unwrap();
@@ -61,11 +69,15 @@ mod bot {
                 Ok(Command::Subscribe(s)) => {
                     info!("sub called");
                     let (tx, rx) = oneshot::channel();
-                    bktx.send(Message::Subscribe {
-                        chat_id: message.chat_id(),
-                        status_url: s,
-                        response_tx: tx,
-                    });
+                    BKCHAN
+                        .0
+                        .send(Message::Subscribe {
+                            chat_id: message.chat_id(),
+                            status_url: s,
+                            response_tx: tx,
+                        })
+                        .await
+                        .ok();
                 }
                 Ok(Command::Unsubscribe(s)) => {
                     info!("unsub called");
@@ -109,10 +121,10 @@ mod book_keeping {
         }
     }
 
-    pub async fn run_book_keeping(bot: AutoSend<Bot>, bkrx: &mut mpsc::Receiver<Message>) {
+    pub async fn run_book_keeping(bot: AutoSend<Bot>) {
         let book_keeper = BookKeeper::new(bot);
 
-        while let Some(message) = bkrx.recv().await {
+        while let Some(message) = BKCHAN.1.lock().expect("failed to lock rx").recv().await {
             match message {
                 Message::Subscribe {
                     chat_id,
