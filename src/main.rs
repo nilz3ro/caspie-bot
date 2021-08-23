@@ -4,7 +4,10 @@ use reqwest;
 use serde::{Deserialize, Serialize};
 use status::BasicNodeStatus;
 use std::sync::Mutex;
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 use teloxide::{prelude::*, utils::command::BotCommand};
 use tokio::sync::{mpsc, oneshot};
 
@@ -26,8 +29,9 @@ async fn main() {
     let bot = Bot::from_env().auto_send();
 
     tokio::join!(
+        bot::start_repl(bot.clone()),
         book_keeping::run_book_keeping(bot.clone()),
-        bot::start_repl(bot.clone())
+        status::get_status()
     );
 }
 
@@ -70,7 +74,9 @@ mod bot {
                 Ok(Command::Unsubscribe(s)) => {
                     info!("unsub called");
                 }
-                Err(_) => todo!(),
+                Err(_) => {
+                    info!("parse error.")
+                }
             }
             respond(())
         })
@@ -112,8 +118,8 @@ mod book_keeping {
     }
 
     pub struct BookKeeper {
-        bot: AutoSend<Bot>,
-        subscriptions: HashMap<String, i64>,
+        pub bot: AutoSend<Bot>,
+        pub subscriptions: HashMap<String, HashSet<i64>>,
     }
 
     impl BookKeeper {
@@ -121,18 +127,10 @@ mod book_keeping {
             let subscriptions = HashMap::default();
             BookKeeper { bot, subscriptions }
         }
-
-        pub fn bot(&self) -> &AutoSend<Bot> {
-            &self.bot
-        }
-
-        pub fn subscriptions(&self) -> &HashMap<String, i64> {
-            &self.subscriptions
-        }
     }
 
     pub async fn run_book_keeping(bot: AutoSend<Bot>) {
-        let book_keeper = BookKeeper::new(bot);
+        let mut book_keeper = BookKeeper::new(bot);
 
         while let Some(message) = BKCHAN.1.lock().expect("failed to lock rx").recv().await {
             match message {
@@ -141,19 +139,81 @@ mod book_keeping {
                     status_url,
                     ..
                 } => {
-                    info!("got a request to sub {} from {}", chat_id, status_url);
+                    info!("subscribing chatter.");
+                    let subscribed_chatters = book_keeper
+                        .subscriptions
+                        .entry(status_url.clone())
+                        .or_default();
+                    if subscribed_chatters.contains(&chat_id) {
+                        info!("chatter already subscribed.");
+                        book_keeper
+                            .bot
+                            .send_message(
+                                chat_id,
+                                format!(
+                                    "You are already subscribed to updates for {}",
+                                    status_url.clone()
+                                ),
+                            )
+                            .await
+                            .expect("failed to send message");
+                    } else {
+                        info!("chatter being subscribed.");
+                        subscribed_chatters.insert(chat_id);
+                        book_keeper
+                            .bot
+                            .send_message(
+                                chat_id,
+                                format!("You are now subscribed to updates for {}", status_url),
+                            )
+                            .await
+                            .expect("failed to send message");
+                    }
                 }
                 Message::Unsubscribe {
                     chat_id,
                     status_url,
                     ..
                 } => {
-                    info!("got a request to unsub {} from {}", chat_id, status_url);
+                    info!("handling unsubscribe");
+                    let subscribed_chatters = book_keeper
+                        .subscriptions
+                        .entry(status_url.clone())
+                        .or_default();
+                    if subscribed_chatters.contains(&chat_id) {
+                        info!("removing chatter from subscriptions.");
+                        subscribed_chatters.remove(&chat_id);
+                        book_keeper
+                            .bot
+                            .send_message(
+                                chat_id,
+                                format!("You will no longer receive updates for {}", status_url),
+                            )
+                            .await
+                            .expect("failed to send message");
+                    } else {
+                        book_keeper
+                            .bot
+                            .send_message(
+                                chat_id,
+                                format!("You are not subscribed to updates for {}", status_url),
+                            )
+                            .await
+                            .expect("failed to send message");
+                    }
                 }
-                Message::GetNodesList { response_tx } => {}
-                Message::NodeStatusUpdate { url, node_status } => {
-                    todo!()
+                Message::GetNodesList { response_tx } => {
+                    let nodes_list: Vec<String> = book_keeper
+                        .subscriptions
+                        .keys()
+                        .map(|s| String::from(s))
+                        .collect();
+                    response_tx
+                        .unwrap()
+                        .send(Ok(nodes_list))
+                        .expect("failed to send nodes list");
                 }
+                Message::NodeStatusUpdate { url, node_status } => {}
             }
         }
     }
@@ -192,10 +252,16 @@ mod status {
                 .await
                 .expect("failed to fetch status.")
                 .json::<BasicNodeStatus>()
-                .await
-                .expect("failed to parse as json.");
+                .await;
 
-            info!("got response: {:?}", response);
+            match response {
+                Ok(response) => {
+                    info!("got response from node");
+                }
+                Err(e) => {
+                    info!("failed to parse response as json.");
+                }
+            }
 
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
