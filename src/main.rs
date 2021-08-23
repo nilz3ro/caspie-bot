@@ -9,7 +9,10 @@ use teloxide::{prelude::*, utils::command::BotCommand};
 use tokio::sync::{mpsc, oneshot};
 
 lazy_static! {
-    static ref BKCHAN: (mpsc::Sender<Message>, Mutex<mpsc::Receiver<Message>>) = {
+    static ref BKCHAN: (
+        mpsc::Sender<book_keeping::Message>,
+        Mutex<mpsc::Receiver<book_keeping::Message>>
+    ) = {
         let (tx, mut rx) = mpsc::channel(64);
         (tx, Mutex::new(rx))
     };
@@ -18,7 +21,7 @@ lazy_static! {
 #[tokio::main]
 async fn main() {
     teloxide::enable_logging!();
-    info!("starting...");
+    info!("starting");
 
     let bot = Bot::from_env().auto_send();
 
@@ -28,21 +31,7 @@ async fn main() {
     );
 }
 
-pub enum Message {
-    Subscribe {
-        status_url: String,
-        chat_id: i64,
-        response_tx: oneshot::Sender<anyhow::Result<()>>,
-    },
-    Unsubscribe {
-        status_url: String,
-        chat_id: i64,
-        response_tx: oneshot::Sender<anyhow::Result<()>>,
-    },
-    // get latest list of node status urls
-    // got node status from status endpoint.
-    // notify subscriber of node status change
-}
+type ResponseChannel<T> = Option<oneshot::Sender<anyhow::Result<T>>>;
 
 mod bot {
     use super::*;
@@ -59,7 +48,7 @@ mod bot {
     }
 
     pub async fn start_repl(bot: AutoSend<Bot>) {
-        info!("starting repl...");
+        info!("starting repl");
         teloxide::repl(bot, |message| async move {
             let t = message.update.text().unwrap();
             match BotCommand::parse(t, String::from("caspiebot")) {
@@ -68,16 +57,15 @@ mod bot {
                 }
                 Ok(Command::Subscribe(s)) => {
                     info!("sub called");
-                    let (tx, rx) = oneshot::channel();
                     BKCHAN
                         .0
-                        .send(Message::Subscribe {
+                        .send(book_keeping::Message::Subscribe {
                             chat_id: message.chat_id(),
                             status_url: s,
-                            response_tx: tx,
+                            response_tx: None,
                         })
                         .await
-                        .ok();
+                        .unwrap();
                 }
                 Ok(Command::Unsubscribe(s)) => {
                     info!("unsub called");
@@ -90,7 +78,7 @@ mod bot {
     }
 
     pub async fn say_hi(b: AutoSend<Bot>) {
-        b.send_message(String::from("1738759164"), "sup dood.")
+        b.send_message(String::from("@nilz3ro"), "sup dood.")
             .send()
             .await
             .expect("failed to send.");
@@ -100,6 +88,28 @@ mod bot {
 
 mod book_keeping {
     use super::*;
+
+    #[derive(Debug)]
+    pub enum Message {
+        Subscribe {
+            status_url: String,
+            chat_id: i64,
+            response_tx: ResponseChannel<()>,
+        },
+        Unsubscribe {
+            status_url: String,
+            chat_id: i64,
+            response_tx: ResponseChannel<()>,
+        },
+        GetNodesList {
+            response_tx: ResponseChannel<Vec<String>>,
+        },
+        NodeStatusUpdate {
+            url: String,
+            node_status: BasicNodeStatus,
+        },
+        // notify subscriber of node status change
+    }
 
     pub struct BookKeeper {
         bot: AutoSend<Bot>,
@@ -140,6 +150,10 @@ mod book_keeping {
                 } => {
                     info!("got a request to unsub {} from {}", chat_id, status_url);
                 }
+                Message::GetNodesList { response_tx } => {}
+                Message::NodeStatusUpdate { url, node_status } => {
+                    todo!()
+                }
             }
         }
     }
@@ -147,6 +161,7 @@ mod book_keeping {
 
 mod status {
     use super::*;
+    use book_keeping::Message;
 
     #[derive(Debug, Serialize, Deserialize)]
     pub struct BasicNodeStatus {
@@ -155,16 +170,34 @@ mod status {
         our_public_signing_key: String,
     }
 
-    pub async fn get_status(bktx: mpsc::Sender<Message>) {
-        info!("getting status...");
+    pub async fn get_status() {
+        loop {
+            info!("requesting addresses");
 
-        let response = reqwest::get("http://sathq.know.systems:8888/status")
-            .await
-            .expect("failed to fetch status.")
-            .json::<BasicNodeStatus>()
-            .await
-            .expect("failed to parse as json.");
+            let (tx, rx) = oneshot::channel();
 
-        info!("got response: {:?}", response);
+            BKCHAN
+                .0
+                .send(Message::GetNodesList {
+                    response_tx: tx.into(),
+                })
+                .await
+                .unwrap();
+
+            let node_urls = rx.await.unwrap().unwrap();
+
+            info!("got node urls! {:?}", node_urls);
+
+            let response = reqwest::get("http://example.com")
+                .await
+                .expect("failed to fetch status.")
+                .json::<BasicNodeStatus>()
+                .await
+                .expect("failed to parse as json.");
+
+            info!("got response: {:?}", response);
+
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
     }
 }
