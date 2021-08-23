@@ -2,7 +2,6 @@ use lazy_static::*;
 use log::info;
 use reqwest;
 use serde::{Deserialize, Serialize};
-use status::BasicNodeStatus;
 use std::sync::Mutex;
 use std::{
     collections::{HashMap, HashSet},
@@ -40,6 +39,16 @@ type ResponseChannel<T> = Option<oneshot::Sender<anyhow::Result<T>>>;
 mod bot {
     use super::*;
 
+    const HELP_TEXT: &'static str = r#"
+Hello! I'm Caspie Bot, here is a list of commands I respond to:
+
+/subscribe {url} - Get notifications for the node at {url} when it goes offline or comes back online. 
+/unsubscribe {url} - Stop getting notifications for the node at {url}.
+/help - display this help text.
+
+Note: {url} must be the full url of the status endpoint for a node: `http://mynode.mysite.com:8888/status`.
+"#;
+
     #[derive(BotCommand)]
     #[command(rename = "lowercase", description = "These commands are supported:")]
     pub enum Command {
@@ -57,10 +66,11 @@ mod bot {
             let t = message.update.text().unwrap();
             match BotCommand::parse(t, String::from("caspiebot")) {
                 Ok(Command::Help) => {
-                    info!("help called");
+                    info!("bot help command called.");
+                    // send help message.
                 }
                 Ok(Command::Subscribe(s)) => {
-                    info!("sub called");
+                    info!("bot sub command called.");
                     BKCHAN
                         .0
                         .send(book_keeping::Message::Subscribe {
@@ -72,10 +82,20 @@ mod bot {
                         .unwrap();
                 }
                 Ok(Command::Unsubscribe(s)) => {
-                    info!("unsub called");
+                    info!("bot unsubscribe command called.");
+                    BKCHAN
+                        .0
+                        .send(book_keeping::Message::Unsubscribe {
+                            chat_id: message.chat_id(),
+                            status_url: s,
+                            response_tx: None,
+                        })
+                        .await
+                        .unwrap();
                 }
                 Err(_) => {
                     info!("parse error.")
+                    // send help text.
                 }
             }
             respond(())
@@ -90,10 +110,17 @@ mod bot {
             .expect("failed to send.");
         info!("sent message.");
     }
+
+    pub async fn send_help_text(bot: AutoSend<Bot>, chat_id: i64) {
+        bot.send_message(chat_id, HELP_TEXT)
+            .await
+            .expect("failed to send help text.");
+    }
 }
 
 mod book_keeping {
     use super::*;
+    use status::{NodeStatus, NodeStatusDetails};
 
     #[derive(Debug)]
     pub enum Message {
@@ -111,15 +138,15 @@ mod book_keeping {
             response_tx: ResponseChannel<Vec<String>>,
         },
         NodeStatusUpdate {
-            url: String,
-            node_status: BasicNodeStatus,
+            status_url: String,
+            node_status: NodeStatus,
         },
         // notify subscriber of node status change
     }
 
     pub struct BookKeeper {
         pub bot: AutoSend<Bot>,
-        pub subscriptions: HashMap<String, HashSet<i64>>,
+        pub subscriptions: HashMap<String, (HashSet<i64>, Vec<NodeStatus>)>,
     }
 
     impl BookKeeper {
@@ -140,7 +167,7 @@ mod book_keeping {
                     ..
                 } => {
                     info!("subscribing chatter.");
-                    let subscribed_chatters = book_keeper
+                    let (subscribed_chatters, _history) = book_keeper
                         .subscriptions
                         .entry(status_url.clone())
                         .or_default();
@@ -176,10 +203,11 @@ mod book_keeping {
                     ..
                 } => {
                     info!("handling unsubscribe");
-                    let subscribed_chatters = book_keeper
+                    let (subscribed_chatters, _history) = book_keeper
                         .subscriptions
                         .entry(status_url.clone())
                         .or_default();
+
                     if subscribed_chatters.contains(&chat_id) {
                         info!("removing chatter from subscriptions.");
                         subscribed_chatters.remove(&chat_id);
@@ -208,12 +236,16 @@ mod book_keeping {
                         .keys()
                         .map(|s| String::from(s))
                         .collect();
+
                     response_tx
                         .unwrap()
                         .send(Ok(nodes_list))
                         .expect("failed to send nodes list");
                 }
-                Message::NodeStatusUpdate { url, node_status } => {}
+                Message::NodeStatusUpdate {
+                    status_url,
+                    node_status,
+                } => {}
             }
         }
     }
@@ -224,13 +256,21 @@ mod status {
     use book_keeping::Message;
 
     #[derive(Debug, Serialize, Deserialize)]
-    pub struct BasicNodeStatus {
+    pub struct NodeStatusDetails {
         api_version: String,
         chainspec_name: String,
         our_public_signing_key: String,
     }
 
+    #[derive(Debug)]
+    pub enum NodeStatus {
+        Online(NodeStatusDetails),
+        Offline,
+    }
+
     pub async fn get_status() {
+        let client = reqwest::Client::new();
+
         loop {
             info!("requesting addresses");
 
@@ -248,19 +288,34 @@ mod status {
 
             info!("got node urls! {:?}", node_urls);
 
-            let response = reqwest::get("http://example.com")
-                .await
-                .expect("failed to fetch status.")
-                .json::<BasicNodeStatus>()
-                .await;
+            for url in node_urls {
+                let client = client.clone();
+                tokio::spawn(async move {
+                    let response = client.get(url.clone()).send().await;
 
-            match response {
-                Ok(response) => {
-                    info!("got response from node");
-                }
-                Err(e) => {
-                    info!("failed to parse response as json.");
-                }
+                    // Map to Some valid & parsed online status or None.
+                    let response = match response {
+                        Ok(res) => match res.json::<NodeStatusDetails>().await {
+                            Ok(parsed) => Some(parsed),
+                            Err(_) => None,
+                        },
+                        Err(_) => None,
+                    };
+
+                    let status = match response {
+                        Some(details) => NodeStatus::Online(details),
+                        None => NodeStatus::Offline,
+                    };
+
+                    BKCHAN
+                        .0
+                        .send(Message::NodeStatusUpdate {
+                            status_url: url,
+                            node_status: status,
+                        })
+                        .await
+                        .expect("failed to send status update.");
+                });
             }
 
             tokio::time::sleep(Duration::from_secs(10)).await;
