@@ -1,11 +1,12 @@
 use super::*;
 use book_keeping::Message;
+use std::fmt;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct NodeStatusDetails {
-    api_version: String,
-    chainspec_name: String,
-    our_public_signing_key: String,
+    pub api_version: String,
+    pub chainspec_name: String,
+    pub our_public_signing_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -20,11 +21,28 @@ impl Default for NodeStatus {
     }
 }
 
+impl fmt::Display for NodeStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NodeStatus::Online(details) => {
+                write!(
+                    f,
+                    "Online:\nAPI Version: {}\nChainSpec Name: {}\nValidator PublicKey: {}",
+                    details.api_version, details.chainspec_name, details.our_public_signing_key
+                )
+            }
+            NodeStatus::Offline => {
+                write!(f, "Offline")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct NodeSubscription {
     pub subscribed_chatters: Vec<i64>,
-    current_status: NodeStatus,
-    previous_status: NodeStatus,
+    pub current_status: NodeStatus,
+    pub previous_status: NodeStatus,
     status_history: Vec<NodeStatus>,
 }
 

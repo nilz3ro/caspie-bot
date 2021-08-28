@@ -143,7 +143,19 @@ pub async fn run_book_keeping(bot: AutoSend<Bot>) {
 
                 node_sub.add_latest_status(node_status);
                 if node_sub.status_changed() {
-                    info!("\n\n\nSTATUS CHANGED\n\n\n")
+                    for &chat_id in node_sub.subscribed_chatters.iter() {
+                        book_keeper
+                            .bot
+                            .send_message(
+                                chat_id,
+                                format!(
+                                    "Node status has changed from {} to {}",
+                                    node_sub.previous_status, node_sub.current_status
+                                ),
+                            )
+                            .await
+                            .expect("failed to send message");
+                    }
                 }
             }
         }
