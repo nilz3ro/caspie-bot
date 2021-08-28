@@ -1,14 +1,14 @@
 use super::*;
 use book_keeping::Message;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct NodeStatusDetails {
     api_version: String,
     chainspec_name: String,
     our_public_signing_key: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum NodeStatus {
     Online(NodeStatusDetails),
     Offline,
@@ -24,6 +24,7 @@ impl Default for NodeStatus {
 pub struct NodeSubscription {
     pub subscribed_chatters: Vec<i64>,
     current_status: NodeStatus,
+    previous_status: NodeStatus,
     status_history: Vec<NodeStatus>,
 }
 
@@ -32,7 +33,61 @@ impl NodeSubscription {
         NodeSubscription {
             subscribed_chatters: vec![],
             current_status: NodeStatus::Offline,
+            previous_status: NodeStatus::Offline,
             status_history: vec![],
+        }
+    }
+
+    /// Adds the latest status to self.status_history,
+    /// Returns a tuple (u8, u8) representing the number of online and offline
+    /// statuses respectively: (online_count, offline_count)
+    pub fn add_latest_status(&mut self, latest: NodeStatus) {
+        self.status_history.push(latest);
+        if self.status_history.len() > 5 {
+            self.status_history.remove(0);
+        }
+    }
+
+    #[inline]
+    fn count_status_history(&mut self) -> (u8, u8) {
+        self.status_history
+            .iter()
+            .fold((0_u8, 0_u8), |(online_count, offline_count), s| match s {
+                NodeStatus::Online(_) => (online_count + 1, offline_count),
+                NodeStatus::Offline => (online_count, offline_count + 1),
+            })
+    }
+
+    pub fn status_changed(&mut self) -> bool {
+        let len = self.status_history.len();
+        let latest_status = self.status_history[len - 1].clone();
+        let (online_count, offline_count) = self.count_status_history();
+        // (5, 0) -> node has been online for 5 checks
+        //    if self.current_status matches NodeStatus::Offline
+        //      self.previous_status = self.current_status.clone()
+        //      self.current_status = latest online status.
+        //    if self.current_status matches NodeStatus::Online return false.
+        //
+
+        match (
+            online_count,
+            offline_count,
+            latest_status.clone(),
+            self.current_status.clone(),
+        ) {
+            (5, 0, NodeStatus::Online(_), NodeStatus::Online(_)) => false,
+            (5, 0, NodeStatus::Online(_), NodeStatus::Offline) => {
+                self.previous_status = self.current_status.clone();
+                self.current_status = latest_status;
+                true
+            }
+            (0, 5, NodeStatus::Offline, NodeStatus::Offline) => false,
+            (0, 5, NodeStatus::Offline, NodeStatus::Online(_)) => {
+                self.previous_status = self.current_status.clone();
+                self.current_status = latest_status;
+                true
+            }
+            _ => false,
         }
     }
 }

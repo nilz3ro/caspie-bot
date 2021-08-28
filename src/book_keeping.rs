@@ -135,7 +135,16 @@ pub async fn run_book_keeping(bot: AutoSend<Bot>) {
                 status_url,
                 node_status,
             } => {
-                info!("status url: {}, status: {:?}", status_url, node_status)
+                info!("status url: {}, status: {:?}", status_url, node_status);
+                let node_sub = book_keeper
+                    .subscriptions
+                    .get_mut(&status_url)
+                    .expect("Failed to get node subscription.");
+
+                node_sub.add_latest_status(node_status);
+                if node_sub.status_changed() {
+                    info!("\n\n\nSTATUS CHANGED\n\n\n")
+                }
             }
         }
     }
